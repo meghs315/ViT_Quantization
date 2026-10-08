@@ -1,0 +1,15 @@
+
+# Model checkpoints
+*.pth
+*.pt
+*.safetensors
+
+# Dataset
+data/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
