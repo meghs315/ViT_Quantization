@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository recreates and adapts quantization experiments I worked on during research at SSRL, where quantization techniques were explored for a medical-imaging binary classification task.
+This repository recreates and adapts quantization experiments I worked on during research at SSRL, where quantization techniques were explored for a medical-imaging binary classification task. The presentation (pdf file) is from when I presented those findings. 
 
 For this project, I use a pretrained Vision Transformer (ViT-Base) and the CIFAR-10 dataset to investigate the trade-off between model checkpoint size and classification accuracy when applying symmetric, per-tensor, weight-only INT8 quantization.
 
