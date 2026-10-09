@@ -27,54 +27,23 @@ def should_quantize(name, tensor):
         and tensor.is_floating_point()
     )
 
+def quantize_tensor(tensor):
+    """Symmetric per-tensor quantization to signed INT8."""
+    x = tensor.detach().to(dtype=torch.float32)
 
-def quantize_tensor(tensor, method="symmetric"):
-    """Return INT8 weights, scale, and zero point."""
-    x = tensor.detach().float()
+    if not torch.isfinite(x).all():
+        raise ValueError("Cannot quantize a tensor with NaN or infinity.")
+
     qmin, qmax = -127, 127
+    max_abs = x.abs().max().item()
 
-    if method == "symmetric":
-        max_abs = x.abs().max().item()
-
-        if max_abs == 0:
-            scale = torch.tensor(1.0)
-        else:
-            scale = torch.tensor(max_abs / qmax)
-
-        zero_point = torch.tensor(0, dtype=torch.int32)
-        quantized = torch.round(x / scale).clamp(qmin, qmax)
-
+    if max_abs == 0:
+        scale = torch.tensor(1.0, dtype=torch.float32)
     else:
-        xmin = x.min().item()
-        xmax = x.max().item()
+        scale = torch.tensor(max_abs / qmax, dtype=torch.float32)
 
-        if xmax == xmin:
-            # Constant tensors are represented exactly as zero
-            # plus a floating-point offset.
-            scale = torch.tensor(1.0)
-            zero_point = torch.tensor(0, dtype=torch.int32)
-            quantized = torch.zeros_like(x)
-            offset = torch.tensor(xmin)
-            return quantized.to(torch.int8), scale, zero_point, offset
-
-        scale = torch.tensor((xmax - xmin) / (qmax - qmin))
-        zero_point = torch.round(
-            torch.tensor(qmin) - xmin / scale
-        ).clamp(qmin, qmax).to(torch.int32)
-
-        quantized = torch.round(x / scale + zero_point)
-        quantized = quantized.clamp(qmin, qmax)
-        offset = torch.tensor(0.0)
-
-        return quantized.to(torch.int8), scale, zero_point, offset
-
-    return (
-        quantized.to(torch.int8),
-        scale,
-        zero_point,
-        torch.tensor(0.0),
-    )
-
+    quantized = torch.round(x / scale).clamp(qmin, qmax)
+    return quantized.to(torch.int8), scale
 
 def main():
     parser = argparse.ArgumentParser()
@@ -85,11 +54,6 @@ def main():
     parser.add_argument(
         "--output",
         default="./vit_cifar10_binary_int8.pt",
-    )
-    parser.add_argument(
-        "--method",
-        choices=["symmetric", "asymmetric"],
-        default="symmetric",
     )
     args = parser.parse_args()
 
@@ -113,36 +77,21 @@ def main():
 
     quantized_state = {}
     scales = {}
-    zero_points = {}
-    offsets = {}
     quantized_count = 0
     skipped_count = 0
 
-    print(f"Quantization method: {args.method}")
+    print(f"Quantization method: symmetric")
 
     for name, tensor in state.items():
         if should_quantize(name, tensor):
-            q, scale, zero_point, offset = quantize_tensor(
-                tensor, args.method
-            )
-
-            quantized_state[name] = q
-            scales[name] = scale
-            zero_points[name] = zero_point
-            offsets[name] = offset
-            quantized_count += 1
-        else:
-            quantized_state[name] = tensor
-            skipped_count += 1
+            q, scale = quantize_tensor(tensor)
 
     output = {
         "quantized_state_dict": quantized_state,
         "scales": scales,
-        "zero_points": zero_points,
-        "offsets": offsets,
         "metadata": {
             "base_model": MODEL_NAME,
-            "method": args.method,
+            "method": "symmetric",
             "quantized_tensors": quantized_count,
             "unchanged_tensors": skipped_count,
             "quantization": "per-tensor weight-only INT8",

@@ -62,82 +62,83 @@ def load_model():
 
 def reconstruct_int8(model, checkpoint_path):
     packed = torch.load(
-        checkpoint_path, map_location="cpu", weights_only=True
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
     )
+
+    if packed["metadata"]["method"] != "symmetric":
+        raise ValueError("Expected a symmetric INT8 checkpoint.")
 
     state = packed["quantized_state_dict"]
     scales = packed["scales"]
-    zero_points = packed["zero_points"]
-    offsets = packed["offsets"]
-
     reconstructed = {}
 
-    for name, q in state.items():
+    for name, tensor in state.items():
         if name in scales:
-            scale = scales[name]
-            zero_point = zero_points[name]
-            offset = offsets[name]
-
-            if packed["metadata"]["method"] == "asymmetric":
-                if offset.item() != 0:
-                    weight = q.float() * scale + offset
-                else:
-                    weight = (q.float() - zero_point.float()) * scale
-            else:
-                weight = q.float() * scale
-
-            reconstructed[name] = weight
+            reconstructed[name] = tensor.float() * scales[name]
         else:
-            reconstructed[name] = q
+            reconstructed[name] = tensor
 
-    model.load_state_dict(reconstructed)
+    model.load_state_dict(reconstructed, strict=True)
     return model
-
 
 def evaluate(model, loader):
     model.eval()
     correct = 0
     total = 0
-    agreements = 0
     timings = []
     warmups = 0
+    timed_images = 0
 
     with torch.inference_mode():
         for images, labels in loader:
             images = images.to(device)
             labels = labels.to(device)
 
-            if warmups < WARMUP_BATCHES:
-                model(pixel_values=images)
-                synchronize()
-                warmups += 1
-                continue
-
+            # Run inference on every batch.
             synchronize()
             start = time.perf_counter()
             logits = model(pixel_values=images).logits
             synchronize()
-            timings.append(time.perf_counter() - start)
+            elapsed = time.perf_counter() - start
 
+            # Every image counts toward accuracy.
             predictions = logits.argmax(dim=1)
             correct += (predictions == labels).sum().item()
             total += labels.size(0)
 
-    elapsed = sum(timings)
+            # Warm-up batches count for accuracy, not timing.
+            if warmups < WARMUP_BATCHES:
+                warmups += 1
+                continue
+
+            timings.append(elapsed)
+            timed_images += labels.size(0)
+
+    if total == 0:
+        raise RuntimeError("No test images were evaluated.")
+    if timed_images == 0:
+        raise RuntimeError("No batches remain for timing.")
+
+    elapsed_total = sum(timings)
 
     return {
         "accuracy": correct / total,
-        "mean_batch_latency_ms": np.mean(timings) * 1000,
-        "mean_image_latency_ms": elapsed / total * 1000,
-        "throughput_images_per_second": total / elapsed,
+        "mean_batch_latency_ms": float(np.mean(timings) * 1000),
+        "mean_image_latency_ms": elapsed_total / timed_images * 1000,
+        "throughput_images_per_second": timed_images / elapsed_total,
         "evaluated_images": total,
+        "timed_images": timed_images,
     }
 
 
 def main():
     for path in (FP32_PATH, INT8_PATH):
         if not os.path.isfile(path):
-            raise FileNotFoundError(path)
+            raise FileNotFoundError(
+                f"Required checkpoint not found: {path}"
+            )
 
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -154,6 +155,7 @@ def main():
         download=True,
         transform=transform,
     )
+
     loader = DataLoader(
         CIFAR10Binary(test_data),
         batch_size=BATCH_SIZE,
@@ -162,16 +164,13 @@ def main():
     )
 
     print(f"Device: {device}")
-
     print("\nEvaluating FP32...")
     fp32_model = load_model().to(device)
     fp32_results = evaluate(fp32_model, loader)
     del fp32_model
 
     print("\nEvaluating reconstructed INT8 weights...")
-    int8_model = reconstruct_int8(
-        load_model(), INT8_PATH
-    ).to(device)
+    int8_model = reconstruct_int8(load_model(), INT8_PATH).to(device)
     int8_results = evaluate(int8_model, loader)
 
     print("\n--- Results ---")
@@ -183,11 +182,13 @@ def main():
         for metric, value in result.items():
             print(f"{metric}: {value}")
 
+    difference = (
+        int8_results["accuracy"] - fp32_results["accuracy"]
+    ) * 100
     print(
         "\nAccuracy difference (percentage points): "
-        f"{(int8_results['accuracy'] - fp32_results['accuracy']) * 100:.2f}"
+        f"{difference:.2f}"
     )
-
 
 if __name__ == "__main__":
     main()
