@@ -75,51 +75,54 @@ correct = 0
 total = 0
 timings = []
 warmup_count = 0
+timed_images = 0
+
+def synchronize():
+    if device.type == "mps":
+        torch.mps.synchronize()
+    elif device.type == "cuda":
+        torch.cuda.synchronize()
 
 with torch.inference_mode():
     for images, labels in test_loader:
         images = images.to(device)
         labels = labels.to(device)
 
-        # Warm up the device before measuring latency.
-        if warmup_count < WARMUP_BATCHES:
-            _ = model(pixel_values=images)
-            if device.type == "mps":
-                torch.mps.synchronize()
-            elif device.type == "cuda":
-                torch.cuda.synchronize()
-            warmup_count += 1
-            continue
-
-        if device.type == "mps":
-            torch.mps.synchronize()
-        elif device.type == "cuda":
-            torch.cuda.synchronize()
-
+        # Run inference for every batch, including warm-up batches.
+        synchronize()
         start = time.perf_counter()
         outputs = model(pixel_values=images)
-
-        if device.type == "mps":
-            torch.mps.synchronize()
-        elif device.type == "cuda":
-            torch.cuda.synchronize()
-
+        synchronize()
         elapsed = time.perf_counter() - start
-        timings.append(elapsed)
 
+        # Every test image contributes to accuracy.
         predictions = outputs.logits.argmax(dim=1)
         correct += (predictions == labels).sum().item()
         total += labels.size(0)
 
+        # Exclude warm-up batches from performance measurements only.
+        if warmup_count < WARMUP_BATCHES:
+            warmup_count += 1
+            continue
+
+        timings.append(elapsed)
+        timed_images += labels.size(0)
+
+if total == 0:
+    raise RuntimeError("No test images were evaluated.")
+if timed_images == 0:
+    raise RuntimeError("No batches remain for timing.")
+
 accuracy = correct / total
 total_time = sum(timings)
 mean_batch_latency = np.mean(timings)
-mean_image_latency = total_time / total
-throughput = total / total_time
+mean_image_latency = total_time / timed_images
+throughput = timed_images / total_time
 checkpoint_mb = os.path.getsize(CHECKPOINT) / (1024 ** 2)
 
 print(f"Device: {device}")
 print(f"Evaluated images: {total}")
+print(f"Timed images: {timed_images}")
 print(f"Accuracy: {accuracy * 100:.2f}%")
 print(f"Mean batch latency: {mean_batch_latency * 1000:.2f} ms")
 print(f"Mean image latency: {mean_image_latency * 1000:.2f} ms")
