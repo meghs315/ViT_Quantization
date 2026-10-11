@@ -6,6 +6,8 @@ This repository recreates and adapts quantization experiments I worked on during
 
 For this project, I use a pretrained Vision Transformer (ViT-Base) and the CIFAR-10 dataset to investigate the trade-off between model checkpoint size and classification accuracy when applying symmetric, per-tensor, weight-only INT8 quantization.
 
+I also benchmarked FP32 vs. FP16 on a Colab T4: FP16 cut peak memory by about 45% and latency by 2.5-4.7x depending on batch size, which shows that checkpoint-size savings and runtime savings come from different techniques.
+
 The experiment establishes a baseline using FP32 weights, applies INT8 quantization to selected model weights, and evaluates the resulting model to measure the effect on accuracy and checkpoint size.
 
 ## Experiment Setup
@@ -59,14 +61,36 @@ The FP32 and quantized checkpoints were evaluated on the same 2,000 test images.
 
 **This experiment does not demonstrate native INT8 inference acceleration.** During evaluation, quantized weights are reconstructed into FP32 before inference. Consequently, the measured inference latency reflects FP32 execution rather than optimized INT8 computation.
 
-The current results demonstrate checkpoint-size reduction and the accuracy impact of weight quantization, not reduced inference latency or runtime memory consumption.
+The current results demonstrate checkpoint-size reduction and the accuracy impact of weight quantization, not reduced inference latency or runtime memory consumption. A separate FP32 vs. FP16 GPU benchmark is below.
 
 Potential next steps include:
 
-* Benchmarking on a cloud GPU.
-* Comparing against a framework-supported INT8 inference implementation.
+* Comparing against a framework-supported INT8 inference implementation with the benchmark framework. 
 * Measuring inference latency, throughput, and runtime memory under equivalent conditions.
 * Exploring additional quantization formats after validating the current implementation.
+
+## Runtime Benchmark (FP32 vs. FP16)
+
+The INT8 work above reduces checkpoint size, but the weights are expanded back to FP32 at runtime, so it does not change GPU inference. To see what does, I benchmarked FP32 against FP16 on the same model.
+
+| Batch | Precision | Latency (median) | Throughput | Peak GPU memory |
+| ----: | --------- | ---------------: | ---------: | --------------: |
+| 1  | FP32 | 13.7 ms  | 73 img/s  | 347 MiB |
+| 1  | FP16 | 5.4 ms   | 184 img/s | 192 MiB |
+| 8  | FP32 | 75.9 ms  | 105 img/s | 399 MiB |
+| 8  | FP16 | 16.5 ms  | 485 img/s | 218 MiB |
+| 32 | FP32 | 304.1 ms | 105 img/s | 580 MiB |
+| 32 | FP16 | 64.1 ms  | 499 img/s | 308 MiB |
+
+FP16 reduced peak memory by about 45% and latency by 2.5x (batch 1) to 4.7x (batch 32). The gain beyond 2x is likely due to the T4's FP16 hardware, though I did not test this.
+
+| Technique | What it changes | Evidence |
+| --------- | --------------- | -------- |
+| Weight-only INT8 (stored, expanded to FP32 at runtime) | Checkpoint size on disk | 74% smaller, 0.10 pt accuracy change |
+| FP16 | Runtime memory, latency, throughput | See table above |
+| Native INT8 inference (TensorRT, bitsandbytes, etc.) | Potentially speed and runtime memory | Not tested; listed as future work |
+
+**Setup:** Colab Tesla T4; pretrained `google/vit-base-patch16-224` (not the fine-tuned model); random 224x224 inputs; batch sizes 1, 8, 32; median of 50 timed runs after 10 warmup passes, with `torch.cuda.synchronize()` around each run; one model on the GPU at a time. Memory is peak PyTorch allocation (`max_memory_allocated`), not total GPU usage. Accuracy was not re-evaluated in FP16.
 
 ## How to Run
 
